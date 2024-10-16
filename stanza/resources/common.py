@@ -117,17 +117,27 @@ def download_file(url, path, proxies, raise_for_status=False):
     """
     verbose = logger.level in [0, 10, 20]
     r = requests.get(url, stream=True, proxies=proxies)
+    file_size = r.headers.get('content-length')
+    if file_size is not None:
+        file_size = int(file_size)
+    default_chunk_size = 131072
+    desc = 'Downloading ' + url
+    
     with open(path, 'wb') as f:
-        file_size = int(r.headers.get('content-length'))
-        default_chunk_size = 131072
-        desc = 'Downloading ' + url
-        with tqdm(total=file_size, unit='B', unit_scale=True, \
-            disable=not verbose, desc=desc) as pbar:
+        if file_size:
+            with tqdm(total=file_size, unit='B', unit_scale=True, disable=not verbose, desc=desc) as pbar:
+                for chunk in r.iter_content(chunk_size=default_chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        f.flush()
+                        pbar.update(len(chunk))
+        else:
+            # No content-length, download without progress bar
             for chunk in r.iter_content(chunk_size=default_chunk_size):
                 if chunk:
                     f.write(chunk)
                     f.flush()
-                    pbar.update(len(chunk))
+
     if raise_for_status:
         r.raise_for_status()
     return r.status_code
