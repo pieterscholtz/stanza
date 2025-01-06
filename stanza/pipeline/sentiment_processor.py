@@ -9,6 +9,7 @@ TODO: a possible way to generalize this would be to make it a
 ClassifierProcessor and have "sentiment" be an option.
 """
 
+import dataclasses
 import torch
 
 from types import SimpleNamespace
@@ -55,10 +56,18 @@ class SentimentProcessor(UDProcessor):
         trainer = Trainer.load(filename=filename,
                                args=args,
                                foundation_cache=pipeline.foundation_cache)
+        self._trainer = trainer
         self._model = trainer.model
         self._model_type = self._model.config.model_type
         # batch size counted as words
         self._batch_size = config.get('batch_size', SentimentProcessor.DEFAULT_BATCH_SIZE)
+
+    def _set_up_final_config(self, config):
+        loaded_args = dataclasses.asdict(self._model.config)
+        loaded_args = {k: v for k, v in loaded_args.items() if not UDProcessor.filter_out_option(k)}
+        loaded_args.update(config)
+        self._config = loaded_args
+
 
     def process(self, document):
         sentences = self._model.extract_sentences(document)

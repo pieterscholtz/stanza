@@ -24,7 +24,8 @@ class TextTooLongError(ValueError):
 
 
 def update_max_length(model_name, tokenizer):
-    if model_name in ('google/muril-base-cased',
+    if model_name in ('hf-internal-testing/tiny-bert',
+                      'google/muril-base-cased',
                       'google/muril-large-cased',
                       'airesearch/wangchanberta-base-att-spm-uncased',
                       'camembert/camembert-large',
@@ -395,7 +396,7 @@ def build_cloned_features(model, tokenizer, attention_tensor, id_tensor, num_lay
         if remaining_attention.shape[1] <= tokenizer.model_max_length:
             break
         remaining_attention = remaining_attention[:, slice_len:]
-        remaining_ids = id_tensor[:, slice_len:]
+        remaining_ids = remaining_ids[:, slice_len:]
     slices = torch.cat(slices, axis=1)
     return slices
 
@@ -412,7 +413,14 @@ def convert_to_position_list(sentence, offsets):
         # this uses the last token piece for any offset by overwriting the previous value
         list_offsets[offset+1] = pos
     list_offsets[0] = 0
-    list_offsets[-1] = list_offsets[-2] + 1
+    for offset in list_offsets[-2::-1]:
+        # count backwards in case the last position was
+        # a word or character that got erased by the tokenizer
+        # this loop should eventually find something...
+        # after all, we just set the first one to be 0
+        if offset is not None:
+            list_offsets[-1] = offset + 1
+            break
     return list_offsets
 
 def extract_base_embeddings(model_name, tokenizer, model, data, device, keep_endpoints, num_layers, detach):

@@ -1,10 +1,21 @@
 """Converts raw data files into json files usable by the training script.
 
-Currently it supports converting wikiner datasets, available here:
+Currently it supports converting WikiNER datasets, available here:
   https://figshare.com/articles/dataset/Learning_multilingual_named_entity_recognition_from_Wikipedia/5462500
   - download the language of interest to {Language}-WikiNER
   - then run
     prepare_ner_dataset.py French-WikiNER
+
+A gold re-edit of WikiNER for French is here:
+  - https://huggingface.co/datasets/danrun/WikiNER-fr-gold/tree/main
+  - https://arxiv.org/abs/2411.00030
+    Danrun Cao, Nicolas Béchet, Pierre-François Marteau
+  - download to $NERBASE/wikiner-fr-gold/wikiner-fr-gold.conll
+    prepare_ner_dataset.py fr_wikinergold
+
+French WikiNER and its gold re-edit can be mixed together with
+    prepare_ner_dataset.py fr_wikinermixed
+  - the data for both WikiNER and WikiNER-fr-gold needs to be in the right place first
 
 Also, Finnish Turku dataset, available here:
   - https://turkunlp.org/fin-ner.html
@@ -437,6 +448,7 @@ IAHLT contains NER for Hebrew in the knesset treebank
 
 import glob
 import os
+import json
 import random
 import re
 import shutil
@@ -444,8 +456,10 @@ import sys
 import tempfile
 
 from stanza.models.common.constant import treebank_to_short_name, lcode2lang, lang_to_langcode, two_to_three_letters
+from stanza.models.ner.utils import to_bio2, bio2_to_bioes
 import stanza.utils.default_paths as default_paths
 
+from stanza.utils.datasets.common import UnknownDatasetError
 from stanza.utils.datasets.ner.preprocess_wikiner import preprocess_wikiner
 from stanza.utils.datasets.ner.split_wikiner import split_wikiner
 import stanza.utils.datasets.ner.build_en_combined as build_en_combined
@@ -475,14 +489,9 @@ import stanza.utils.datasets.ner.simplify_en_worldwide as simplify_en_worldwide
 import stanza.utils.datasets.ner.suc_to_iob as suc_to_iob
 import stanza.utils.datasets.ner.suc_conll_to_iob as suc_conll_to_iob
 import stanza.utils.datasets.ner.convert_hy_armtdp as convert_hy_armtdp
-from stanza.utils.datasets.ner.utils import convert_bio_to_json, get_tags, read_tsv, write_dataset, random_shuffle_by_prefixes, read_prefix_file, combine_files
+from stanza.utils.datasets.ner.utils import convert_bioes_to_bio, convert_bio_to_json, get_tags, read_tsv, write_sentences, write_dataset, random_shuffle_by_prefixes, read_prefix_file, combine_files
 
 SHARDS = ('train', 'dev', 'test')
-
-class UnknownDatasetError(ValueError):
-    def __init__(self, dataset, text):
-        super().__init__(text)
-        self.dataset = dataset
 
 def process_turku(paths, short_name):
     assert short_name == 'fi_turku'
@@ -610,6 +619,172 @@ def process_wikiner(paths, dataset):
     print("Splitting %s to %s" % (csv_file, base_output_path))
     split_wikiner(base_output_path, csv_file, prefix=short_name)
     convert_bio_to_json(base_output_path, base_output_path, short_name)
+
+def process_french_wikiner_gold(paths, dataset):
+    short_name = treebank_to_short_name(dataset)
+
+    base_input_path = os.path.join(paths["NERBASE"], "wikiner-fr-gold")
+    base_output_path = paths["NER_DATA_DIR"]
+
+    input_filename = os.path.join(base_input_path, "wikiner-fr-gold.conll")
+    if not os.path.exists(input_filename):
+        raise FileNotFoundError("Could not find the expected input file %s for dataset %s" % (input_filename, base_input_path))
+
+    print("Reading %s" % input_filename)
+    sentences = read_tsv(input_filename, text_column=0, annotation_column=2, separator=" ")
+    print("Read %d sentences" % len(sentences))
+
+    tags = [y for sentence in sentences for x, y in sentence]
+    tags = sorted(set(tags))
+    print("Found the following tags:\n%s" % tags)
+    expected_tags = ['B-LOC', 'B-MISC', 'B-ORG', 'B-PER',
+                     'E-LOC', 'E-MISC', 'E-ORG', 'E-PER',
+                     'I-LOC', 'I-MISC', 'I-ORG', 'I-PER',
+                     'O',
+                     'S-LOC', 'S-MISC', 'S-ORG', 'S-PER']
+    assert tags == expected_tags
+
+    output_filename = os.path.join(base_output_path, "%s.full.bioes" % short_name)
+    print("Writing BIOES to %s" % output_filename)
+    write_sentences(output_filename, sentences)
+
+    print("Splitting %s to %s" % (output_filename, base_output_path))
+    split_wikiner(base_output_path, output_filename, prefix=short_name, suffix="bioes")
+    convert_bioes_to_bio(base_output_path, base_output_path, short_name)
+    convert_bio_to_json(base_output_path, base_output_path, short_name, suffix="bioes")
+
+def process_french_wikiner_mixed(paths, dataset):
+    """
+    Build both the original and gold edited versions of WikiNER, then mix them
+
+    First we eliminate any duplicates (with one exception), then we combine the data
+
+    There are two main ways we could have done this:
+      - mix it together without any restrictions
+      - use the multi_ner mechanism to build a dataset which represents two prediction heads
+
+    The second method seems to give slightly better results than the first method,
+    but neither beat just using a transformer on the gold set alone
+
+    On the randomly selected test set, using WV and charlm but not a transformer
+    (this was on a previously published version of the dataset):
+
+    one prediction head:
+      INFO: Score by entity:
+        Prec.   Rec.    F1
+        89.32   89.26   89.29
+      INFO: Score by token:
+        Prec.   Rec.    F1
+        89.43   86.88   88.14
+      INFO: Weighted f1 for non-O tokens: 0.878855
+
+    two prediction heads:
+      INFO: Score by entity:
+        Prec.   Rec.    F1
+        89.83   89.76   89.79
+      INFO: Score by token:
+        Prec.   Rec.    F1
+        89.17   88.15   88.66
+      INFO: Weighted f1 for non-O tokens: 0.885675
+
+    On a randomly selected dev set, using transformer:
+
+    gold:
+      INFO: Score by entity:
+        Prec.   Rec.    F1
+        93.63   93.98   93.81
+      INFO: Score by token:
+        Prec.   Rec.    F1
+        92.80   92.79   92.80
+      INFO: Weighted f1 for non-O tokens: 0.927548
+
+    mixed:
+      INFO: Score by entity:
+        Prec.   Rec.    F1
+        93.54   93.82   93.68
+      INFO: Score by token:
+        Prec.   Rec.    F1
+        92.99   92.51   92.75
+      INFO: Weighted f1 for non-O tokens: 0.926964
+    """
+    short_name = treebank_to_short_name(dataset)
+
+    process_french_wikiner_gold(paths, "fr_wikinergold")
+    process_wikiner(paths, "French-WikiNER")
+    base_output_path = paths["NER_DATA_DIR"]
+
+    with open(os.path.join(base_output_path, "fr_wikinergold.train.json")) as fin:
+        gold_train = json.load(fin)
+    with open(os.path.join(base_output_path, "fr_wikinergold.dev.json")) as fin:
+        gold_dev = json.load(fin)
+    with open(os.path.join(base_output_path, "fr_wikinergold.test.json")) as fin:
+        gold_test = json.load(fin)
+
+    gold = gold_train + gold_dev + gold_test
+    print("%d total sentences in the gold relabeled dataset (randomly split)" % len(gold))
+    gold = {tuple([x["text"] for x in sentence]): sentence for sentence in gold}
+    print("  (%d after dedup)" % len(gold))
+
+    original = (read_tsv(os.path.join(base_output_path, "fr_wikiner.train.bio"), text_column=0, annotation_column=1) +
+                read_tsv(os.path.join(base_output_path, "fr_wikiner.dev.bio"), text_column=0, annotation_column=1) +
+                read_tsv(os.path.join(base_output_path, "fr_wikiner.test.bio"), text_column=0, annotation_column=1))
+    print("%d total sentences in the original wiki" % len(original))
+    original_words = {tuple([x[0] for x in sentence]) for sentence in original}
+    print("  (%d after dedup)" % len(original_words))
+
+    missing = [sentence for sentence in gold if sentence not in original_words]
+    for sentence in missing:
+        # the capitalization of WisiGoths and OstroGoths is different
+        # between the original and the new in some cases
+        goths = tuple([x.replace("Goth", "goth") for x in sentence])
+        if goths != sentence and goths in original_words:
+            original_words.add(sentence)
+    missing = [sentence for sentence in gold if sentence not in original_words]
+    # currently this dataset doesn't find two sentences
+    # one was dropped by the filter for incompletely tagged lines
+    # the other is probably not a huge deal to have one duplicate
+    print("Missing %d sentences" % len(missing))
+    assert len(missing) <= 2
+    for sent in missing:
+        print(sent)
+
+    skipped = 0
+    silver = []
+    silver_used = set()
+    for sentence in original:
+        words = tuple([x[0] for x in sentence])
+        tags = tuple([x[1] for x in sentence])
+        if words in gold or words in silver_used:
+            skipped += 1
+            continue
+        tags = to_bio2(tags)
+        tags = bio2_to_bioes(tags)
+        sentence = [{"text": x, "ner": y, "multi_ner": ["-", y]} for x, y in zip(words, tags)]
+        silver.append(sentence)
+        silver_used.add(words)
+    print("Using %d sentences from the original wikiner alongside the gold annotated train set" % len(silver))
+    print("Skipped %d sentences" % skipped)
+
+    gold_train = [[{"text": x["text"], "ner": x["ner"], "multi_ner": [x["ner"], "-"]} for x in sentence]
+                  for sentence in gold_train]
+    gold_dev = [[{"text": x["text"], "ner": x["ner"], "multi_ner": [x["ner"], "-"]} for x in sentence]
+                  for sentence in gold_dev]
+    gold_test = [[{"text": x["text"], "ner": x["ner"], "multi_ner": [x["ner"], "-"]} for x in sentence]
+                  for sentence in gold_test]
+
+    mixed_train = gold_train + silver
+    print("Total sentences in the mixed training set: %d" % len(mixed_train))
+    output_filename = os.path.join(base_output_path, "%s.train.json" % short_name)
+    with open(output_filename, 'w', encoding='utf-8') as fout:
+        json.dump(mixed_train, fout, indent=1)
+
+    output_filename = os.path.join(base_output_path, "%s.dev.json" % short_name)
+    with open(output_filename, 'w', encoding='utf-8') as fout:
+        json.dump(gold_dev, fout, indent=1)
+    output_filename = os.path.join(base_output_path, "%s.test.json" % short_name)
+    with open(output_filename, 'w', encoding='utf-8') as fout:
+        json.dump(gold_test, fout, indent=1)
+
 
 def get_rgai_input_path(paths):
     return os.path.join(paths["NERBASE"], "hu_rgai")
@@ -1216,6 +1391,8 @@ DATASET_MAPPING = {
     "en_worldwide-9class": process_en_worldwide_9class,
     "fa_arman":          process_fa_arman,
     "fi_turku":          process_turku,
+    "fr_wikinergold":    process_french_wikiner_gold,
+    "fr_wikinermixed":   process_french_wikiner_mixed,
     "hi_hiner":          process_hiner,
     "hi_hinercollapsed": process_hinercollapsed,
     "hi_ijc":            process_ijc,

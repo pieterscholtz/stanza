@@ -22,6 +22,7 @@ class Mode(Enum):
     TRAIN = 1
     SCORE_DEV = 2
     SCORE_TEST = 3
+    SCORE_TRAIN = 4
 
 class ArgumentParserWithExtraHelp(argparse.ArgumentParser):
     def __init__(self, sub_argparse, *args, **kwargs):
@@ -56,6 +57,7 @@ def build_argparse(sub_argparse=None):
     parser.add_argument('--train', dest='mode', default=Mode.TRAIN, action='store_const', const=Mode.TRAIN, help='Run in train mode')
     parser.add_argument('--score_dev', dest='mode', action='store_const', const=Mode.SCORE_DEV, help='Score the dev set')
     parser.add_argument('--score_test', dest='mode', action='store_const', const=Mode.SCORE_TEST, help='Score the test set')
+    parser.add_argument('--score_train', dest='mode', action='store_const', const=Mode.SCORE_TRAIN, help='Score the train set as a test set.  Currently only implemented for some models')
 
     # These arguments need to be here so we can identify if the model already exists in the user-specified home
     # TODO: when all of the model scripts handle their own names, can eliminate this argument
@@ -72,7 +74,7 @@ def add_charlm_args(parser):
     parser.add_argument('--charlm', default="default", type=str, help='Which charlm to run on.  Will use the default charlm for this language/model if not set.  Set to None to turn off charlm for languages with a default charlm')
     parser.add_argument('--no_charlm', dest='charlm', action="store_const", const=None, help="Don't use a charlm, even if one is used by default for this package")
 
-def main(run_treebank, model_dir, model_name, add_specific_args=None, sub_argparse=None, build_model_filename=None, choose_charlm_method=None):
+def main(run_treebank, model_dir, model_name, add_specific_args=None, sub_argparse=None, build_model_filename=None, choose_charlm_method=None, args=None):
     """
     A main program for each of the run_xyz scripts
 
@@ -83,7 +85,11 @@ def main(run_treebank, model_dir, model_name, add_specific_args=None, sub_argpar
       - the charlm, for example, needs this feature, since it makes
         both forward and backward models
     """
-    logger.info("Training program called with:\n" + " ".join(sys.argv))
+    if args is None:
+        logger.info("Training program called with:\n" + " ".join(sys.argv))
+        args = sys.argv[1:]
+    else:
+        logger.info("Training program called with:\n" + " ".join(args))
 
     paths = default_paths.get_default_paths()
 
@@ -93,9 +99,9 @@ def main(run_treebank, model_dir, model_name, add_specific_args=None, sub_argpar
     if '--extra_args' in sys.argv:
         idx = sys.argv.index('--extra_args')
         extra_args = sys.argv[idx+1:]
-        command_args = parser.parse_args(sys.argv[1:idx])
+        command_args = parser.parse_args(sys.argv[:idx])
     else:
-        command_args, extra_args = parser.parse_known_args()
+        command_args, extra_args = parser.parse_known_args(args=args)
 
     # Pass this through to the underlying model as well as use it here
     # we don't put --save_name here for the awkward situation of

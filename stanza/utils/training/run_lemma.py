@@ -20,16 +20,24 @@ import os
 
 from stanza.models import identity_lemmatizer
 from stanza.models import lemmatizer
+from stanza.models.lemma import attach_lemma_classifier
 
 from stanza.utils.training import common
 from stanza.utils.training.common import Mode, add_charlm_args, build_lemma_charlm_args, choose_lemma_charlm
+from stanza.utils.training import run_lemma_classifier
 
 from stanza.utils.datasets.prepare_lemma_treebank import check_lemmas
+import stanza.utils.datasets.prepare_lemma_classifier as prepare_lemma_classifier
 
 logger = logging.getLogger('stanza')
 
 def add_lemma_args(parser):
     add_charlm_args(parser)
+
+    parser.add_argument('--lemma_classifier', dest='lemma_classifier', action='store_true', default=None,
+                        help="Don't use the lemma classifier datasets.  Default is to build lemma classifier as part of the original lemmatizer if the charlm is used")
+    parser.add_argument('--no_lemma_classifier', dest='lemma_classifier', action='store_false',
+                        help="Don't use the lemma classifier datasets.  Default is to build lemma classifier as part of the original lemmatizer if the charlm is used")
 
 def build_model_filename(paths, short_name, command_args, extra_args):
     """
@@ -45,7 +53,7 @@ def build_model_filename(paths, short_name, command_args, extra_args):
     train_file     = f"{lemma_dir}/{short_name}.train.in.conllu"
 
     if not os.path.exists(train_file):
-        logger.debug("Treebank %s is not prepared for training the lemmatizer.  Could not find any training data at %s  Cannot figure out the expected save_name without looking at the data, but a later step in the process will skip the training anyway" % (treebank, train_file))
+        logger.debug("Treebank %s is not prepared for training the lemmatizer.  Could not find any training data at %s  Cannot figure out the expected save_name without looking at the data, but a later step in the process will skip the training anyway" % (short_name, train_file))
         return None
 
     has_lemmas = check_lemmas(train_file)
@@ -141,6 +149,27 @@ def run_treebank(mode, paths, treebank, short_name,
             test_args = test_args + charlm_args + extra_args
             logger.info("Running test lemmatizer for {} with args {}".format(treebank, test_args))
             lemmatizer.main(test_args)
+
+        use_lemma_classifier = command_args.lemma_classifier
+        if use_lemma_classifier is None:
+            use_lemma_classifier = command_args.charlm is not None
+        use_lemma_classifier = use_lemma_classifier and short_name in prepare_lemma_classifier.DATASET_MAPPING
+        if use_lemma_classifier and mode == Mode.TRAIN:
+            lc_charlm_args = ['--no_charlm'] if command_args.charlm is None else ['--charlm', command_args.charlm]
+            lemma_classifier_args = [treebank] + lc_charlm_args
+            if command_args.force:
+                lemma_classifier_args.append('--force')
+            run_lemma_classifier.main(lemma_classifier_args)
+
+            save_name = build_model_filename(paths, short_name, command_args, extra_args)
+            # TODO: use a temp path for the lemma_classifier or keep it somewhere
+            attach_args = ['--input', save_name,
+                           '--output', save_name,
+                           '--classifier', 'saved_models/lemma_classifier/%s_lemma_classifier.pt' % short_name]
+            attach_lemma_classifier.main(attach_args)
+
+            # now we rerun the dev set - the HI in particular demonstrates some good improvement
+            lemmatizer.main(dev_args)
 
 def main():
     common.main(run_treebank, "lemma", "lemmatizer", add_lemma_args, sub_argparse=lemmatizer.build_argparse(), build_model_filename=build_model_filename, choose_charlm_method=choose_lemma_charlm)

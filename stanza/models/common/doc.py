@@ -366,6 +366,12 @@ class Document(StanzaObject):
                         word.id = idx_w
                 elif perform_mwt_processing == MWTProcessingType.PROCESS:
                     expanded = [x for x in expansions[idx_e].split(' ') if len(x) > 0]
+                    # in the event the MWT annotator only split the
+                    # Token into a single Word, we preserve its text
+                    # otherwise the Token's text is different from its
+                    # only Word's text
+                    if len(expanded) == 1:
+                        expanded = [token.text]
                     idx_e += 1
                     idx_w_end = idx_w + len(expanded) - 1
                     if token.misc:  # None can happen when using a prebuilt doc
@@ -390,7 +396,7 @@ class Document(StanzaObject):
                     word.sent = sentence
                     word.parent = token
                     sentence.words.append(word)
-                if len(token.words) > 1 and token.start_char is not None and token.end_char is not None and "".join(word.text for word in token.words) == token.text:
+                if token.start_char is not None and token.end_char is not None and "".join(word.text for word in token.words) == token.text:
                     start_char = token.start_char
                     for word in token.words:
                         end_char = start_char + len(word.text)
@@ -433,6 +439,16 @@ class Document(StanzaObject):
             s_ents = s.build_ents()
             self.ents += s_ents
         return self.ents
+
+    def sort_features(self):
+        """ Sort the features on all the words... useful for prototype treebanks, for example """
+        for sentence in self.sentences:
+            for word in sentence.words:
+                if not word.feats:
+                    continue
+                pieces = word.feats.split("|")
+                pieces = sorted(pieces)
+                word.feats = "|".join(pieces)
 
     def iter_words(self):
         """ An iterator that returns all of the words in this Document. """
@@ -1614,8 +1630,16 @@ class Span(StanzaObject):
         # load start and end char offsets from tokens
         self.start_char = self.tokens[0].start_char
         self.end_char = self.tokens[-1].end_char
-        # assume doc is already provided and not None
-        self.text = self.doc.text[self.start_char:self.end_char]
+        if self.doc is not None and self.doc.text is not None:
+            self.text = self.doc.text[self.start_char:self.end_char]
+        elif tokens[0].sent is tokens[-1].sent:
+            sentence = tokens[0].sent
+            text_start = tokens[0].start_char - sentence.tokens[0].start_char
+            text_end = tokens[-1].end_char - sentence.tokens[0].start_char
+            self.text = sentence.text[text_start:text_end]
+        else:
+            # TODO: do any spans ever cross sentences?
+            raise RuntimeError("Document text does not exist, and the span tested crosses two sentences, so it is impossible to extract the entity text!")
         # collect the words of the span following tokens
         self.words = [w for t in tokens for w in t.words]
         # set the sentence back-pointer to point to the sentence of the first token

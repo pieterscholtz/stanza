@@ -15,6 +15,42 @@ import stanza.utils.datasets.ner.prepare_ner_file as prepare_ner_file
 
 SHARDS = ('train', 'dev', 'test')
 
+def bioes_to_bio(tags):
+    new_tags = []
+    in_entity = False
+    for tag in tags:
+        if tag == 'O':
+            new_tags.append(tag)
+            in_entity = False
+        elif in_entity and (tag.startswith("B-") or tag.startswith("S-")):
+            # TODO: does the tag have to match the previous tag?
+            # eg, does B-LOC B-PER in BIOES need a B-PER or is I-PER sufficient?
+            new_tags.append('B-' + tag[2:])
+        else:
+            new_tags.append('I-' + tag[2:])
+            in_entity = True
+    return new_tags
+
+def convert_bioes_to_bio(base_input_path, base_output_path, short_name):
+    """
+    Convert BIOES files back to BIO (not BIO2)
+
+    Useful for preparing datasets for CoreNLP, which doesn't do great with the more highly split classes
+    """
+    for shard in SHARDS:
+        input_filename = os.path.join(base_input_path, '%s.%s.bioes' % (short_name, shard))
+        output_filename = os.path.join(base_output_path, '%s.%s.bio' % (short_name, shard))
+
+        input_sentences = read_tsv(input_filename, text_column=0, annotation_column=1)
+        new_sentences = []
+        for sentence in input_sentences:
+            tags = [x[1] for x in sentence]
+            tags = bioes_to_bio(tags)
+            sentence = [(x[0], y) for x, y in zip(sentence, tags)]
+            new_sentences.append(sentence)
+        write_sentences(output_filename, new_sentences)
+
+
 def convert_bio_to_json(base_input_path, base_output_path, short_name, suffix="bio", shard_names=SHARDS, shards=SHARDS):
     """
     Convert BIO files to json
@@ -22,6 +58,8 @@ def convert_bio_to_json(base_input_path, base_output_path, short_name, suffix="b
     It can often be convenient to put the intermediate BIO files in
     the same directory as the output files, in which case you can pass
     in same path for both base_input_path and base_output_path.
+
+    This also will rewrite a BIOES as json
     """
     for input_shard, output_shard in zip(shard_names, shards):
         input_filename = os.path.join(base_input_path, '%s.%s.%s' % (short_name, input_shard, suffix))

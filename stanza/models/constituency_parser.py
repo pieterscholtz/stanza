@@ -341,8 +341,8 @@ def build_argparse():
     parser.add_argument('--silver_file', type=str, default=None, help='Secondary training file.')
     parser.add_argument('--silver_remove_duplicates', default=False, action='store_true', help="Do/don't remove duplicates from the silver training file.  Could be useful for intentionally reweighting some trees")
     parser.add_argument('--eval_file', type=str, default=None, help='Input file for data loader.')
-    # TODO: write a unit test of these things
-    # and possibly refactor --tokenized_file / --tokenized_dir from here & ensemble
+    # TODO: possibly refactor --tokenized_file / --tokenized_dir from here & ensemble
+    parser.add_argument('--xml_tree_file', type=str, default=None, help='Input file of VLSP formatted trees for parsing with parse_text.')
     parser.add_argument('--tokenized_file', type=str, default=None, help='Input file of tokenized text for parsing with parse_text.')
     parser.add_argument('--tokenized_dir', type=str, default=None, help='Input directory of tokenized text for parsing with parse_text.')
     parser.add_argument('--mode', default='train', choices=['train', 'parse_text', 'predict', 'remove_optimizer'])
@@ -562,6 +562,26 @@ def build_argparse():
     parser.add_argument('--loss', default='cross', help='cross, large_margin, or focal.  Focal requires `pip install focal_loss_torch`')
     parser.add_argument('--loss_focal_gamma', default=2, type=float, help='gamma value for a focal loss')
 
+    # turn off dropout for word_dropout, predict_dropout, and lstm_input_dropout
+    # this mechanism doesn't actually turn off lstm_layer_dropout (yet)
+    # but that is set to a default of 0 anyway
+    # this is reusing the idea presented in
+    # https://arxiv.org/pdf/2303.01500v2
+    # "Dropout Reduces Underfitting"
+    # Zhuang Liu, Zhiqiu Xu, Joseph Jin, Zhiqiang Shen, Trevor Darrell
+    # Unfortunately, this does not consistently help results
+    # Averaged of 5 models w/ transformer, dev / test
+    # id_icon - improves a little
+    #  baseline           0.8823    0.8904
+    #  early_dropout 40   0.8835    0.8919
+    # ja_alt - worsens a little
+    #  baseline           0.9308    0.9355
+    #  early_dropout 40   0.9287    0.9345
+    # vi_vlsp23 - worsens a little
+    #  baseline           0.8262    0.8290
+    #  early_dropout 40   0.8255    0.8286
+    # We keep this as an available option for further experiments, if needed
+    parser.add_argument('--early_dropout', default=-1, type=int, help='When to turn off dropout')
     # When using word_dropout and predict_dropout in conjunction with relu, one particular experiment produced the following dev scores after 300 iterations:
     # 0.0: 0.9085
     # 0.2: 0.9165

@@ -16,6 +16,7 @@ import time
 from datetime import datetime
 import argparse
 import logging
+import math
 import numpy as np
 import random
 import torch
@@ -61,6 +62,7 @@ def build_argparse():
     parser.add_argument('--attn_type', default='soft', choices=['soft', 'mlp', 'linear', 'deep'], help='Attention type')
     parser.add_argument('--no_copy', dest='copy', action='store_false', help='Do not use copy mechanism in MWT expansion. By default copy mechanism is used to improve generalization.')
 
+    parser.add_argument('--augment_apos', default=0.01, type=float, help='At training time, how much to augment |\'| to |"| |’| |ʼ|')
     parser.add_argument('--force_exact_pieces', default=None, action='store_true', help='If possible, make the text of the pieces of the MWT add up to the token itself.  (By default, this is determined from the dataset.)')
     parser.add_argument('--no_force_exact_pieces', dest='force_exact_pieces', action='store_false', help="Don't make the text of the pieces of the MWT add up to the token itself.  (By default, this is determined from the dataset.)")
 
@@ -139,6 +141,9 @@ def train(args):
         logger.warning("Training data available, but dev data has no MWTs.  Only training a dict based MWT")
         args['dict_only'] = True
 
+    if args['force_exact_pieces'] and not mwts_composed_of_words(train_doc):
+        raise ValueError("Cannot train model with --force_exact_pieces, as the MWT in this dataset are not entirely composed of their subwords")
+
     if args['force_exact_pieces'] is None and mwts_composed_of_words(train_doc):
         # the force_exact_pieces mechanism trains a separate version of the MWT expander in the Trainer
         # (the training loop here does not need to change)
@@ -147,6 +152,8 @@ def train(args):
         # this behavior can be turned off at training time with --no_force_exact_pieces
         logger.info("Train MWTs entirely composed of their subwords.  Training the MWT to match that paradigm as closely as possible")
         args['force_exact_pieces'] = True
+
+    if args['force_exact_pieces']:
         logger.info("Reconverting to BinaryDataLoader")
         train_batch = BinaryDataLoader(train_doc, args['batch_size'], args, evaluation=False)
         vocab = train_batch.vocab
@@ -178,7 +185,8 @@ def train(args):
         # train a seq2seq model
         logger.info("Training seq2seq-based MWT expander...")
         global_step = 0
-        max_steps = len(train_batch) * args['num_epoch']
+        steps_per_epoch = math.ceil(len(train_batch) / args['batch_size'])
+        max_steps = steps_per_epoch * args['num_epoch']
         dev_score_history = []
         best_dev_preds = []
         current_lr = args['lr']
@@ -195,7 +203,7 @@ def train(args):
         # start training
         for epoch in range(1, args['num_epoch']+1):
             train_loss = 0
-            for i, batch in enumerate(train_batch):
+            for i, batch in enumerate(train_batch.to_loader()):
                 start_time = time.time()
                 global_step += 1
                 loss = trainer.update(batch, eval=False) # update step
@@ -212,7 +220,7 @@ def train(args):
             # eval on dev
             logger.info("Evaluating on dev set...")
             dev_preds = []
-            for i, batch in enumerate(dev_batch):
+            for i, batch in enumerate(dev_batch.to_loader()):
                 preds = trainer.predict(batch)
                 dev_preds += preds
             if args.get('ensemble_dict', False) and args.get('ensemble_early_stop', False):
@@ -290,7 +298,7 @@ def evaluate(args):
         else:
             logger.info("Running the seq2seq model...")
             preds = []
-            for i, b in enumerate(batch):
+            for i, b in enumerate(batch.to_loader()):
                 preds += trainer.predict(b)
 
             if loaded_args.get('ensemble_dict', False):

@@ -12,12 +12,14 @@ from torch import nn
 import torch.nn.init as init
 
 import stanza.models.common.seq2seq_constant as constant
+from stanza.models.common.doc import TEXT, UPOS
 from stanza.models.common.foundation_cache import load_charlm
 from stanza.models.common.seq2seq_model import Seq2SeqModel
 from stanza.models.common.char_model import CharacterLanguageModelWordAdapter
 from stanza.models.common import utils, loss
 from stanza.models.lemma import edit
 from stanza.models.lemma.vocab import MultiVocab
+from stanza.models.lemma_classifier.base_model import LemmaClassifier
 
 logger = logging.getLogger('stanza')
 
@@ -30,10 +32,10 @@ def unpack_batch(batch, device):
 
 class Trainer(object):
     """ A trainer for training models. """
-    def __init__(self, args=None, vocab=None, emb_matrix=None, model_file=None, device=None, foundation_cache=None):
+    def __init__(self, args=None, vocab=None, emb_matrix=None, model_file=None, device=None, foundation_cache=None, lemma_classifier_args=None):
         if model_file is not None:
             # load everything from file
-            self.load(model_file, args, foundation_cache)
+            self.load(model_file, args, foundation_cache, lemma_classifier_args)
         else:
             # build model from scratch
             self.args = args
@@ -45,6 +47,7 @@ class Trainer(object):
             # dict-based components
             self.word_dict = dict()
             self.composite_dict = dict()
+            self.contextual_lemmatizers = []
 
         self.caseless = self.args.get('caseless', False)
 
@@ -142,6 +145,56 @@ class Trainer(object):
                 final += [lem]
         return final
 
+    def has_contextual_lemmatizers(self):
+        return self.contextual_lemmatizers is not None and len(self.contextual_lemmatizers) > 0
+
+    def predict_contextual(self, sentence_words, sentence_tags, preds):
+        if len(self.contextual_lemmatizers) == 0:
+            return preds
+
+        # reversed so that the first lemmatizer has priority
+        for contextual in reversed(self.contextual_lemmatizers):
+            pred_idx = []
+            pred_sent_words = []
+            pred_sent_tags = []
+            pred_sent_ids = []
+            for sent_id, (words, tags) in enumerate(zip(sentence_words, sentence_tags)):
+                indices = contextual.target_indices(words, tags)
+                for idx in indices:
+                    pred_idx.append(idx)
+                    pred_sent_words.append(words)
+                    pred_sent_tags.append(tags)
+                    pred_sent_ids.append(sent_id)
+            if len(pred_idx) == 0:
+                continue
+            contextual_predictions = contextual.predict(pred_idx, pred_sent_words, pred_sent_tags)
+            for sent_id, word_id, pred in zip(pred_sent_ids, pred_idx, contextual_predictions):
+                preds[sent_id][word_id] = pred
+        return preds
+
+    def update_contextual_preds(self, doc, preds):
+        """
+        Update a flat list of preds with the output of the contextual lemmatizers
+
+        - First, it unflattens the preds based on the lengths of the sentences
+        - Then it uses the contextual lemmatizers
+        - Finally, it reflattens the preds into the format expected by the caller
+        """
+        if len(self.contextual_lemmatizers) == 0:
+            return preds
+
+        sentence_words = doc.get([TEXT], as_sentences=True)
+        sentence_tags = doc.get([UPOS], as_sentences=True)
+        sentence_preds = []
+        start_index = 0
+        for sent in sentence_words:
+            end_index = start_index + len(sent)
+            sentence_preds.append(preds[start_index:end_index])
+            start_index += len(sent)
+        preds = self.predict_contextual(sentence_words, sentence_tags, sentence_preds)
+        preds = [lemma for sentence in preds for lemma in sentence]
+        return preds
+
     def update_lr(self, new_lr):
         utils.change_lr(self.optimizer, new_lr)
 
@@ -228,15 +281,20 @@ class Trainer(object):
             'model': model_state,
             'dicts': (self.word_dict, self.composite_dict),
             'vocab': self.vocab.state_dict(),
-            'config': self.args
+            'config': self.args,
+            'contextual': [],
         }
-        os.makedirs(os.path.split(filename)[0], exist_ok=True)
+        for contextual in self.contextual_lemmatizers:
+            params['contextual'].append(contextual.get_save_dict())
+        save_dir = os.path.split(filename)[0]
+        if save_dir:
+            os.makedirs(os.path.split(filename)[0], exist_ok=True)
         torch.save(params, filename, _use_new_zipfile_serialization=False)
         logger.info("Model saved to {}".format(filename))
 
-    def load(self, filename, args, foundation_cache):
+    def load(self, filename, args, foundation_cache, lemma_classifier_args=None):
         try:
-            checkpoint = torch.load(filename, lambda storage, loc: storage)
+            checkpoint = torch.load(filename, lambda storage, loc: storage, weights_only=True)
         except BaseException:
             logger.error("Cannot load model from {}".format(filename))
             raise
@@ -253,3 +311,6 @@ class Trainer(object):
         else:
             self.model = None
         self.vocab = MultiVocab.load_state_dict(checkpoint['vocab'])
+        self.contextual_lemmatizers = []
+        for contextual in checkpoint.get('contextual', []):
+            self.contextual_lemmatizers.append(LemmaClassifier.from_checkpoint(contextual, args=lemma_classifier_args))

@@ -5,6 +5,7 @@ import tempfile
 
 import pytest
 import torch
+from torch import nn
 from torch import optim
 
 from stanza import Pipeline
@@ -15,6 +16,7 @@ from stanza.models.common.bert_embedding import load_bert, load_tokenizer
 from stanza.models.common.foundation_cache import FoundationCache
 from stanza.models.common.utils import set_random_seed
 from stanza.models.constituency import lstm_model
+from stanza.models.constituency.parse_transitions import Transition
 from stanza.models.constituency import parser_training
 from stanza.models.constituency import trainer
 from stanza.models.constituency import tree_reader
@@ -124,9 +126,11 @@ class TestTrainer:
         Just tests that saving and loading works without crashs.
 
         Currently no test of the values themselves
+        (checks some fields to make sure they are regenerated correctly)
         """
         with tempfile.TemporaryDirectory(dir=TEST_WORKING_DIR) as tmpdirname:
             tr = build_trainer(wordvec_pretrain_file)
+            transitions = tr.model.transitions
 
             # attempt saving
             filename = os.path.join(tmpdirname, "parser.pt")
@@ -135,7 +139,10 @@ class TestTrainer:
             assert os.path.exists(filename)
 
             # load it back in
-            tr.load(filename)
+            tr2 = tr.load(filename)
+            trans2 = tr2.model.transitions
+            assert(transitions == trans2)
+            assert all(isinstance(x, Transition) for x in trans2)
 
     def test_relearn_structure(self, wordvec_pretrain_file):
         """
@@ -246,6 +253,29 @@ class TestTrainer:
         """
         with tempfile.TemporaryDirectory(dir=TEST_WORKING_DIR) as tmpdirname:
             self.run_train_test(wordvec_pretrain_file, tmpdirname)
+
+    def test_early_dropout(self, wordvec_pretrain_file):
+        """
+        Test the whole thing for a few iterations on the fake data
+        """
+        with tempfile.TemporaryDirectory(dir=TEST_WORKING_DIR) as tmpdirname:
+            args = ['--early_dropout', '3']
+            _, model = self.run_train_test(wordvec_pretrain_file, tmpdirname, num_epochs=6, extra_args=args)
+            model = model.model
+            dropouts = [(name, module) for name, module in model.named_children() if isinstance(module, nn.Dropout)]
+            assert len(dropouts) > 0, "Didn't find any dropouts in the model!"
+            for name, module in dropouts:
+                assert module.p == 0.0, "Dropout module %s was not set to 0 with early_dropout"
+
+        with tempfile.TemporaryDirectory(dir=TEST_WORKING_DIR) as tmpdirname:
+            # test that when turned off, early_dropout doesn't happen
+            args = ['--early_dropout', '-1']
+            _, model = self.run_train_test(wordvec_pretrain_file, tmpdirname, num_epochs=6, extra_args=args)
+            model = model.model
+            dropouts = [(name, module) for name, module in model.named_children() if isinstance(module, nn.Dropout)]
+            assert len(dropouts) > 0, "Didn't find any dropouts in the model!"
+            if all(module.p == 0.0 for _, module in dropouts):
+                raise AssertionError("All dropouts were 0 after training even though early_dropout was set to -1")
 
     def test_train_silver(self, wordvec_pretrain_file):
         """
@@ -418,7 +448,7 @@ class TestTrainer:
             bert_model, bert_tokenizer = foundation_cache.load_bert(transformer_name)
             assert self.bert_weights_allclose(bert_model, trained_model)
 
-            checkpoint = torch.load(args['save_name'], lambda storage, loc: storage)
+            checkpoint = torch.load(args['save_name'], lambda storage, loc: storage, weights_only=True)
             params = checkpoint['params']
             # check that the bert model wasn't saved in the model
             assert all(not x.startswith("bert_model.") for x in params['model'].keys())
